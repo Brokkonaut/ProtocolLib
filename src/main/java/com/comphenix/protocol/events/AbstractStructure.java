@@ -769,6 +769,10 @@ public abstract class AbstractStructure {
      * @return A modifier for MobEffectList fields.
      */
     public StructureModifier<PotionEffectType> getEffectTypes() {
+        if (MinecraftVersion.CONFIG_PHASE_PROTOCOL_UPDATE.atOrAbove()) {
+            return getHolders(MinecraftReflection.getMobEffectListClass(), BukkitConverters.getEffectTypeConverter());
+        }
+
         // Convert to and from Bukkit
         return structureModifier.withType(
                 MinecraftReflection.getMobEffectListClass(),
@@ -793,11 +797,20 @@ public abstract class AbstractStructure {
      * @return A modifier for Holder fields
      * @param <T> Bukkit type
      */
-    public <T> StructureModifier<T> getHolders(Class<?> genericType,
-                                               EquivalentConverter<T> converter) {
+    public <T> StructureModifier<T> getHolders(Class<?> genericType, EquivalentConverter<T> converter) {
+        Preconditions.checkNotNull(genericType, "genericType cannot be null");
+        Preconditions.checkNotNull(converter, "converter cannot be null");
+
+        Class<?> holderClass = MinecraftReflection.getHolderClass();
+
+        WrappedRegistry registry = WrappedRegistry.getRegistry(genericType);
+        if (registry == null) {
+            throw new IllegalArgumentException("No registry found for " + genericType);
+        }
+
         return structureModifier.withParamType(
-                MinecraftReflection.getHolderClass(),
-                Converters.holder(converter, WrappedRegistry.getRegistry(genericType)),
+                holderClass,
+                Converters.ignoreNull(Converters.holder(converter, registry)),
                 genericType
         );
     }
@@ -856,6 +869,55 @@ public abstract class AbstractStructure {
                 EnumWrappers.getChatTypeClass(),
                 EnumWrappers.getChatTypeConverter());
     }
+
+    /**
+     * Retrieve a read/write structure for the DisplaySlot enum in 1.20.2.
+     * @return A modifier for DisplaySlot enum fields.
+     */
+    public StructureModifier<EnumWrappers.DisplaySlot> getDisplaySlots() {
+        return structureModifier.withType(
+                EnumWrappers.getDisplaySlotClass(),
+                EnumWrappers.getDisplaySlotConverter());
+    }
+
+    /**
+     * Retrieve a read/write structure for the RenderType enum.
+     * @return A modifier for RenderType enum fields.
+     */
+    public StructureModifier<EnumWrappers.RenderType> getRenderTypes() {
+        return structureModifier.withType(
+                EnumWrappers.getRenderTypeClass(),
+                EnumWrappers.getRenderTypeConverter());
+    }
+
+    /**
+     * Retrieve a read/write structure for the ChatFormatting enum.
+     * @return A modifier for ChatFormatting enum fields.
+     */
+    public StructureModifier<EnumWrappers.ChatFormatting> getChatFormattings() {
+        return structureModifier.withType(
+                EnumWrappers.getChatFormattingClass(),
+                EnumWrappers.getChatFormattingConverter());
+    }
+
+    /**
+     * Retrieve a read/write structure for optional team parameters in 1.17+.
+     * @return A modifier for optional team parameters fields.
+     */
+    public StructureModifier<Optional<WrappedTeamParameters>> getOptionalTeamParameters() {
+        return getOptionals(BukkitConverters.getWrappedTeamParametersConverter());
+    }
+
+    /**
+     * Retrieve a read/write structure for the NumberFormat class in 1.20.4+.
+     * @return A modifier for NumberFormat fields.
+     */
+    public StructureModifier<WrappedNumberFormat> getNumberFormats() {
+        return structureModifier.withType(
+                MinecraftReflection.getNumberFormatClass().orElse(null),
+                BukkitConverters.getWrappedNumberFormatConverter());
+    }
+
 
     /**
      * Retrieve a read/write structure for the MinecraftKey class.

@@ -32,6 +32,7 @@ import com.comphenix.protocol.reflect.accessors.Accessors;
 import com.comphenix.protocol.reflect.accessors.ConstructorAccessor;
 import com.comphenix.protocol.reflect.fuzzy.FuzzyMethodContract;
 import com.comphenix.protocol.reflect.instances.DefaultInstances;
+import com.comphenix.protocol.reflect.instances.InstanceCreator;
 import com.comphenix.protocol.utility.ByteBuddyFactory;
 import com.comphenix.protocol.utility.MinecraftMethods;
 import com.comphenix.protocol.utility.MinecraftReflection;
@@ -66,7 +67,7 @@ public class StructureCache {
 	}
 
     // Structure modifiers
-    private static final Map<Class<?>, Supplier<Object>> PACKET_INSTANCE_CREATORS = new ConcurrentHashMap<>();
+    private static final Map<Class<?>, Supplier<Object>> CACHED_INSTANCE_CREATORS = new ConcurrentHashMap<>();
     private static final Map<PacketType, StructureModifier<Object>> STRUCTURE_MODIFIER_CACHE = new ConcurrentHashMap<>();
 
     // packet data serializer which always returns an empty nbt tag compound
@@ -76,85 +77,103 @@ public class StructureCache {
     private static Supplier<Object> TRICKED_DATA_SERIALIZER_BASE;
     private static Supplier<Object> TRICKED_DATA_SERIALIZER_JSON;
 
+    /**
+     * @deprecated Renamed to {@link #newInstance(Class)}.
+     */
+    @Deprecated
     public static Object newPacket(Class<?> packetClass) {
-        Supplier<Object> packetConstructor = PACKET_INSTANCE_CREATORS.computeIfAbsent(packetClass, packetClassKey -> {
-        	WrappedStreamCodec streamCodec = PacketRegistry.getStreamCodec(packetClassKey);
-        	
-			// use the new stream codec for versions above 1.20.5 if possible
-			if (streamCodec != null && tryInitTrickDataSerializer()) {
-				try {
-					// first try with the base accessor
-					Object serializer = TRICKED_DATA_SERIALIZER_BASE.get();
-					streamCodec.decode(serializer); // throwaway instance, for testing
+        return newInstance(packetClass);
+    }
 
-					// method is working
-					return () -> streamCodec.decode(serializer);
-				} catch (Exception exception) {
+    public static Object newInstance(Class<?> clazz) {
+        Supplier<Object> creator = CACHED_INSTANCE_CREATORS.computeIfAbsent(clazz, StructureCache::determineBestCreator);
+        return creator.get();
+    }
+
+    static Supplier<Object> determineBestCreator(Class<?> clazz) {
+        try {
+            InstanceCreator creator = InstanceCreator.forClass(clazz);
+            if (creator.get() != null) {
+                return creator;
+            }
+        } catch (Exception ignored) {
+        }
+
+        WrappedStreamCodec streamCodec = PacketRegistry.getStreamCodec(clazz);
+
+        // use the new stream codec for versions above 1.20.5 if possible
+        if (streamCodec != null && tryInitTrickDataSerializer()) {
+            try {
+                // first try with the base accessor
+                Object serializer = TRICKED_DATA_SERIALIZER_BASE.get();
+                streamCodec.decode(serializer); // throwaway instance, for testing
+
+                // method is working
+                return () -> streamCodec.decode(serializer);
+            } catch (Exception ignored) {
+                try {
+                    // try with the json accessor
+                    Object serializer = TRICKED_DATA_SERIALIZER_JSON.get();
+                    streamCodec.decode(serializer); // throwaway instance, for testing
+
+                    // method is working
+                    return () -> streamCodec.decode(serializer);
+                } catch (Exception ignored1) {
+                    // shrug, fall back to default behaviour
+                }
+            }
+            
+            try {
+				UNSAFE.allocateInstance(clazz);
+				return () -> {
 					try {
-						// try with the json accessor
-						Object serializer = TRICKED_DATA_SERIALIZER_JSON.get();
-						streamCodec.decode(serializer); // throwaway instance, for testing
-
-						// method is working
-						return () -> streamCodec.decode(serializer);
-					} catch (Exception ignored) {
-						// shrug, fall back to default behaviour
+						return UNSAFE.allocateInstance(clazz);
+					} catch (InstantiationException e) {
+						throw new RuntimeException(e);
 					}
-				}
-
-				try {
-					UNSAFE.allocateInstance(packetClass);
-					return () -> {
-						try {
-							return UNSAFE.allocateInstance(packetClass);
-						} catch (InstantiationException e) {
-							throw new RuntimeException(e);
-						}
-					};
-				} catch (Exception ignored) {
-					// shrug, fall back to default behaviour
-				}
+				};
+			} catch (Exception ignored) {
+				// shrug, fall back to default behaviour
 			}
+        }
 
-            // prefer construction via PacketDataSerializer constructor on 1.17 and above
-        	if (MinecraftVersion.CAVES_CLIFFS_1.atOrAbove()) {
-                ConstructorAccessor serializerAccessor = Accessors.getConstructorAccessorOrNull(
-                        packetClassKey,
-                        MinecraftReflection.getPacketDataSerializerClass());
-                if (serializerAccessor != null) {
-                    // check if the method is possible
-                    if (tryInitTrickDataSerializer()) {
+        // prefer construction via PacketDataSerializer constructor on 1.17 and above
+        if (MinecraftVersion.CAVES_CLIFFS_1.atOrAbove()) {
+            ConstructorAccessor serializerAccessor = Accessors.getConstructorAccessorOrNull(
+                clazz,
+                MinecraftReflection.getPacketDataSerializerClass());
+            if (serializerAccessor != null) {
+                // check if the method is possible
+                if (tryInitTrickDataSerializer()) {
+                    try {
+                        // first try with the base accessor
+                        Object serializer = TRICKED_DATA_SERIALIZER_BASE.get();
+                        serializerAccessor.invoke(serializer); // throwaway instance, for testing
+
+                        // method is working
+                        return () -> serializerAccessor.invoke(serializer);
+                    } catch (Exception ignored) {
                         try {
-                            // first try with the base accessor
-                            Object serializer = TRICKED_DATA_SERIALIZER_BASE.get();
+                            // try with the json accessor
+                            Object serializer = TRICKED_DATA_SERIALIZER_JSON.get();
                             serializerAccessor.invoke(serializer); // throwaway instance, for testing
 
                             // method is working
                             return () -> serializerAccessor.invoke(serializer);
-                        } catch (Exception exception) {
-                            try {
-                                // try with the json accessor
-                                Object serializer = TRICKED_DATA_SERIALIZER_JSON.get();
-                                serializerAccessor.invoke(serializer); // throwaway instance, for testing
-
-                                // method is working
-                                return () -> serializerAccessor.invoke(serializer);
-                            } catch (Exception ignored) {
-                                // shrug, fall back to default behaviour
-                            }
+                        } catch (Exception ignored1) {
+                            // shrug, fall back to default behaviour
                         }
                     }
                 }
             }
+        }
 
-            // try via DefaultInstances as fallback
-            return () -> {
-                Object packetInstance = DefaultInstances.DEFAULT.create(packetClassKey);
-                Objects.requireNonNull(packetInstance, "Unable to create packet instance for class " + packetClassKey + " - " + tryInitTrickDataSerializer() + " - " + streamCodec);
-                return packetInstance;
-            };
-        });
-        return packetConstructor.get();
+        // try via DefaultInstances as fallback
+        return () -> {
+            Object packetInstance = DefaultInstances.DEFAULT.create(clazz);
+            Objects.requireNonNull(packetInstance, "Unable to create instance for class " + clazz + " - " + tryInitTrickDataSerializer() + " - " + streamCodec);
+            return packetInstance;
+        };
     }
 
     /**
@@ -213,59 +232,59 @@ public class StructureCache {
         return TRICKED_DATA_SERIALIZER_BASE.get();
     }
 
-	static void initTrickDataSerializer() {
-		Optional<Class<?>> registryByteBuf = MinecraftReflection.getRegistryFriendlyByteBufClass();
+    static void initTrickDataSerializer() {
+        Optional<Class<?>> registryByteBuf = MinecraftReflection.getRegistryFriendlyByteBufClass();
 
-		// create an empty instance of a nbt tag compound / text compound that we can re-use when needed
-		Object textCompound = WrappedChatComponent.fromText("").getHandle();
-		Object compound = Accessors.getConstructorAccessor(MinecraftReflection.getNBTCompoundClass()).invoke();
+        // create an empty instance of a nbt tag compound / text compound that we can re-use when needed
+        Object textCompound = WrappedChatComponent.fromText("").getHandle();
+        Object compound = Accessors.getConstructorAccessor(MinecraftReflection.getNBTCompoundClass()).invoke();
 
-		// base builder which intercepts a few methods
-		DynamicType.Builder<?> baseBuilder = ByteBuddyFactory.getInstance()
-			.createSubclass(registryByteBuf.orElse(MinecraftReflection.getPacketDataSerializerClass()))
-			.name(MinecraftMethods.class.getPackage().getName() + ".ProtocolLibTricksNmsDataSerializerBase")
-			.method(ElementMatchers.takesArguments(MinecraftReflection.getNBTReadLimiterClass())
-				.and(ElementMatchers.returns(ElementMatchers.isSubTypeOf(MinecraftReflection.getNBTBaseClass()))))
-			.intercept(FixedValue.value(compound))
-			.method(ElementMatchers.returns(MinecraftReflection.getIChatBaseComponentClass()))
-			.intercept(FixedValue.value(textCompound))
-			.method(ElementMatchers.returns(PublicKey.class).and(ElementMatchers.takesNoArguments()))
-			.intercept(FixedValue.nullValue());
-		Class<?> serializerBase = baseBuilder.make()
-			.load(ByteBuddyFactory.getInstance().getClassLoader(), Default.INJECTION)
-			.getLoaded();
+        // base builder which intercepts a few methods
+        DynamicType.Builder<?> baseBuilder = ByteBuddyFactory.getInstance()
+            .createSubclass(registryByteBuf.orElse(MinecraftReflection.getPacketDataSerializerClass()))
+            .name(MinecraftMethods.class.getPackage().getName() + ".ProtocolLibTricksNmsDataSerializerBase")
+            .method(ElementMatchers.takesArguments(MinecraftReflection.getNBTReadLimiterClass())
+                .and(ElementMatchers.returns(ElementMatchers.isSubTypeOf(MinecraftReflection.getNBTBaseClass()))))
+            .intercept(FixedValue.value(compound))
+            .method(ElementMatchers.returns(MinecraftReflection.getIChatBaseComponentClass()))
+            .intercept(FixedValue.value(textCompound))
+            .method(ElementMatchers.returns(PublicKey.class).and(ElementMatchers.takesNoArguments()))
+            .intercept(FixedValue.nullValue());
+        Class<?> serializerBase = baseBuilder.make()
+            .load(ByteBuddyFactory.getInstance().getClassLoader(), Default.INJECTION)
+            .getLoaded();
 
-		if (registryByteBuf.isPresent()) {
-			ConstructorAccessor accessor = Accessors.getConstructorAccessor(FuzzyReflection.fromClass(serializerBase, true).getConstructor(FuzzyMethodContract.newBuilder()
-					.parameterDerivedOf(ByteBuf.class)
-					.parameterDerivedOf(MinecraftReflection.getRegistryAccessClass())
-					.build()));
-			TRICKED_DATA_SERIALIZER_BASE = () -> accessor.invoke(new ZeroBuffer(), MinecraftRegistryAccess.get());
-		} else {
-			ConstructorAccessor accessor = Accessors.getConstructorAccessor(serializerBase, ByteBuf.class);
-			TRICKED_DATA_SERIALIZER_BASE = () -> accessor.invoke(new ZeroBuffer());
-		}
+        if (registryByteBuf.isPresent()) {
+            ConstructorAccessor accessor = Accessors.getConstructorAccessor(FuzzyReflection.fromClass(serializerBase, true).getConstructor(FuzzyMethodContract.newBuilder()
+                    .parameterDerivedOf(ByteBuf.class)
+                    .parameterDerivedOf(MinecraftReflection.getRegistryAccessClass())
+                    .build()));
+            TRICKED_DATA_SERIALIZER_BASE = () -> accessor.invoke(new ZeroBuffer(), MinecraftRegistryAccess.get());
+        } else {
+            ConstructorAccessor accessor = Accessors.getConstructorAccessor(serializerBase, ByteBuf.class);
+            TRICKED_DATA_SERIALIZER_BASE = () -> accessor.invoke(new ZeroBuffer());
+        }
 
-		//xtended builder which intercepts the read string method as well
-		Class<?> withStringIntercept = baseBuilder
-			.name(MinecraftMethods.class.getPackage().getName() + ".ProtocolLibTricksNmsDataSerializerJson")
-			.method(ElementMatchers.returns(String.class).and(ElementMatchers.takesArguments(int.class)))
-			.intercept(FixedValue.value("{}"))
-			.make()
-			.load(ByteBuddyFactory.getInstance().getClassLoader(), Default.INJECTION)
-			.getLoaded();
-		
-		if (registryByteBuf.isPresent()) {
-			ConstructorAccessor accessor = Accessors.getConstructorAccessor(FuzzyReflection.fromClass(withStringIntercept).getConstructor(FuzzyMethodContract.newBuilder()
-					.parameterDerivedOf(ByteBuf.class)
-					.parameterDerivedOf(MinecraftReflection.getRegistryAccessClass())
-					.build()));
-			TRICKED_DATA_SERIALIZER_JSON = () -> accessor.invoke(new ZeroBuffer(), MinecraftRegistryAccess.get());
-		} else {
-			ConstructorAccessor accessor = Accessors.getConstructorAccessor(withStringIntercept, ByteBuf.class);
-			TRICKED_DATA_SERIALIZER_JSON = () -> accessor.invoke(new ZeroBuffer());
-		}
-	}
+        //xtended builder which intercepts the read string method as well
+        Class<?> withStringIntercept = baseBuilder
+            .name(MinecraftMethods.class.getPackage().getName() + ".ProtocolLibTricksNmsDataSerializerJson")
+            .method(ElementMatchers.returns(String.class).and(ElementMatchers.takesArguments(int.class)))
+            .intercept(FixedValue.value("{}"))
+            .make()
+            .load(ByteBuddyFactory.getInstance().getClassLoader(), Default.INJECTION)
+            .getLoaded();
+
+        if (registryByteBuf.isPresent()) {
+            ConstructorAccessor accessor = Accessors.getConstructorAccessor(FuzzyReflection.fromClass(withStringIntercept).getConstructor(FuzzyMethodContract.newBuilder()
+                    .parameterDerivedOf(ByteBuf.class)
+                    .parameterDerivedOf(MinecraftReflection.getRegistryAccessClass())
+                    .build()));
+            TRICKED_DATA_SERIALIZER_JSON = () -> accessor.invoke(new ZeroBuffer(), MinecraftRegistryAccess.get());
+        } else {
+            ConstructorAccessor accessor = Accessors.getConstructorAccessor(withStringIntercept, ByteBuf.class);
+            TRICKED_DATA_SERIALIZER_JSON = () -> accessor.invoke(new ZeroBuffer());
+        }
+    }
 
     /**
      * Creates a packet data serializer sub-class if needed to allow the fixed read of a NbtTagCompound because of a

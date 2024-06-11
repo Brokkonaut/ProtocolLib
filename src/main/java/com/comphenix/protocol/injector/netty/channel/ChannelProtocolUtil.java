@@ -12,10 +12,11 @@ import com.comphenix.protocol.reflect.accessors.Accessors;
 import com.comphenix.protocol.reflect.accessors.FieldAccessor;
 import com.comphenix.protocol.reflect.accessors.MethodAccessor;
 import com.comphenix.protocol.reflect.fuzzy.FuzzyFieldContract;
-import com.comphenix.protocol.reflect.fuzzy.FuzzyMethodContract;
 import com.comphenix.protocol.utility.MinecraftReflection;
 
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.ChannelHandlerContext;
 import io.netty.util.AttributeKey;
 
 @SuppressWarnings("unchecked")
@@ -33,7 +34,7 @@ final class ChannelProtocolUtil {
 
         BiFunction<Channel, PacketType.Sender, Object> baseResolver = null;
         if (attributeKeys.isEmpty()) {
-        	// since 1.20.5 the protocol is stored as final field in de-/encoder
+            // since 1.20.5 the protocol is stored as final field in de-/encoder
             baseResolver = new Post1_20_5WrappedResolver();
         } else if (attributeKeys.size() == 1) {
             // if there is only one attribute key we can assume it's the correct one (1.8 - 1.20.1)
@@ -75,7 +76,7 @@ final class ChannelProtocolUtil {
         }
 
         // decorate the base resolver by wrapping its return value into our packet type value
-        PROTOCOL_RESOLVER = baseResolver.andThen(nmsProtocol -> PacketType.Protocol.fromVanilla((Enum<?>) nmsProtocol));
+        PROTOCOL_RESOLVER = baseResolver.andThen(protocol -> PacketType.Protocol.fromVanilla((Enum<?>) protocol));
     }
 
     private static final class Pre1_20_2DirectResolver implements BiFunction<Channel, PacketType.Sender, Object> {
@@ -149,58 +150,60 @@ final class ChannelProtocolUtil {
 
         @Override
         public Object apply(Channel channel, PacketType.Sender sender) {
-            String key = this.getKeyForSender(sender);
-            Object codecHandler = channel.pipeline().get(key);
-            if (codecHandler == null) {
+            Class<? extends ChannelHandler> handlerClass = this.getHandlerClass(sender)
+                    .asSubclass(ChannelHandler.class);
+
+            ChannelHandlerContext handlerContext = channel.pipeline().context(handlerClass);
+            if (handlerContext == null) {
                 return null;
             }
 
-            Function<Object, Object> protocolAccessor = this.getProtocolAccessor(codecHandler.getClass(), sender);
-            return protocolAccessor.apply(codecHandler);
+            Function<Object, Object> protocolAccessor = this.getProtocolAccessor(handlerClass, sender);
+            return protocolAccessor.apply(handlerContext.handler());
         }
 
         private Function<Object, Object> getProtocolAccessor(Class<?> codecHandler, PacketType.Sender sender) {
             switch (sender) {
                 case SERVER:
-                	if (this.serverProtocolAccessor == null) {
-                		this.serverProtocolAccessor = getProtocolAccessor(codecHandler);
-                	}
-                	return this.serverProtocolAccessor;
+                    if (this.serverProtocolAccessor == null) {
+                        this.serverProtocolAccessor = getProtocolAccessor(codecHandler);
+                    }
+                    return this.serverProtocolAccessor;
                 case CLIENT:
-                	if (this.clientProtocolAccessor == null) {
-                		this.clientProtocolAccessor = getProtocolAccessor(codecHandler);
-                	}
-                	return this.clientProtocolAccessor;
+                    if (this.clientProtocolAccessor == null) {
+                        this.clientProtocolAccessor = getProtocolAccessor(codecHandler);
+                    }
+                    return this.clientProtocolAccessor;
                 default:
                     throw new IllegalArgumentException("Illegal packet sender " + sender.name());
             }
         }
 
-        private String getKeyForSender(PacketType.Sender sender) {
+        private Class<?> getHandlerClass(PacketType.Sender sender) {
             switch (sender) {
                 case SERVER:
-                    return "encoder";
+                    return MinecraftReflection.getMinecraftClass("network.PacketEncoder");
                 case CLIENT:
-                    return "decoder";
+                    return MinecraftReflection.getMinecraftClass("network.PacketDecoder");
                 default:
                     throw new IllegalArgumentException("Illegal packet sender " + sender.name());
             }
         }
 
         private Function<Object, Object> getProtocolAccessor(Class<?> codecHandler) {
-    		Class<?> protocolInfoClass = MinecraftReflection.getProtocolInfoClass();
+            Class<?> protocolInfoClass = MinecraftReflection.getProtocolInfoClass();
 
-    		MethodAccessor protocolAccessor = Accessors.getMethodAccessor(FuzzyReflection
-    				.fromClass(protocolInfoClass)
-    				.getMethodByReturnTypeAndParameters("id", MinecraftReflection.getEnumProtocolClass(), new Class[0]));
+            MethodAccessor protocolAccessor = Accessors.getMethodAccessor(FuzzyReflection
+                    .fromClass(protocolInfoClass).getMethodByReturnTypeAndParameters("id",
+                            MinecraftReflection.getEnumProtocolClass(), new Class[0]));
 
-    		FieldAccessor protocolInfoAccessor = Accessors.getFieldAccessor(codecHandler, protocolInfoClass, true);
-    		
-    		// get ProtocolInfo from handler and get EnumProtocol of ProtocolInfo
-    		return (handler) -> {
-    			Object protocolInfo = protocolInfoAccessor.get(handler);
-    			return protocolAccessor.invoke(protocolInfo);
-    		};
+            FieldAccessor protocolInfoAccessor = Accessors.getFieldAccessor(codecHandler, protocolInfoClass, true);
+
+            // get ProtocolInfo from handler and get EnumProtocol of ProtocolInfo
+            return (handler) -> {
+                Object protocolInfo = protocolInfoAccessor.get(handler);
+                return protocolAccessor.invoke(protocolInfo);
+            };
         }
     }
 }
