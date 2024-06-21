@@ -373,6 +373,11 @@ public final class MinecraftReflection {
         if (clazz == null || object == null) {
             return false;
         }
+        
+        // check for accidential class objects
+        if (object instanceof Class) {
+            return clazz.isAssignableFrom((Class<?>) object);
+        }
 
         return clazz.isAssignableFrom(object.getClass());
     }
@@ -416,6 +421,10 @@ public final class MinecraftReflection {
      */
     public static boolean isPacketClass(Object obj) {
         return is(getPacketClass(), obj);
+    }
+
+    public static boolean isPacketClass(Class<?> clazz) {
+        return is(getPacketClass(), clazz);
     }
 
     /**
@@ -496,6 +505,10 @@ public final class MinecraftReflection {
      */
     public static boolean isCraftItemStack(Object obj) {
         return is(getCraftItemStackClass(), obj);
+    }
+
+    public static boolean isIChatBaseComponent(Class<?> target) {
+        return is(getIChatBaseComponentClass(), target);
     }
 
     /**
